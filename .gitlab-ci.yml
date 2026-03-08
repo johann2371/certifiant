@@ -1,4 +1,4 @@
-# Pipeline GitLab CI/CD pour backend uniquement, projet Examen_certifiant
+# Pipeline GitLab CI/CD pour backend uniquement - Examen_certifiant
 image: docker:26
 
 services:
@@ -58,13 +58,8 @@ backend_test:
   stage: test
   image: maven:3.9.6-eclipse-temurin-17
   script:
-    - mkdir -p .m2/repository          # Crée le cache Maven si absent
     - chmod +x mvnw
     - ./mvnw $MAVEN_CLI_OPTS clean test -Dspring.profiles.active=test
-  artifacts:
-    reports:
-      junit: target/surefire-reports/TEST-*.xml
-    expire_in: 1 week
   only:
     - main
     - merge_requests
@@ -152,10 +147,9 @@ check_health:
   image: curlimages/curl:latest
   needs: ["build_backend"]
   script:
-    - |
-      echo "Pipeline terminé avec succès !"
-      echo "Image Backend: $DOCKER_IMAGE_BACKEND:latest"
-      echo "Commit: $CI_COMMIT_SHORT_SHA"
-      echo "Javadoc disponible dans les artifacts."
+    - echo "Pipeline terminé avec succès !"
+    - echo "Image Backend: $DOCKER_IMAGE_BACKEND:latest"
+    - echo "Commit: $CI_COMMIT_SHORT_SHA"
+    - echo "Javadoc disponible dans les artifacts."
   only:
     - main
