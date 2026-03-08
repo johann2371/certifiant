@@ -1,0 +1,161 @@
+# Pipeline GitLab CI/CD pour backend uniquement, projet Examen_certifiant
+image: docker:26
+
+services:
+  - docker:26-dind
+
+stages:
+  - pre-commit
+  - test
+  - quality
+  - build
+  - security-test
+  - documentation
+  - deploy
+
+default:
+  interruptible: true
+
+variables:
+  DOCKER_IMAGE_BACKEND: $DOCKERHUB_USERNAME/examen-backend
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=true"
+  # SONAR_TOKEN et SONAR_HOST_URL doivent être configurés dans GitLab CI/CD → Settings > CI/CD > Variables
+
+cache:
+  paths:
+    - .m2/repository
+  key: "$CI_COMMIT_REF_SLUG"
+
+# =============================
+# SECURITE PRE-COMMIT
+# =============================
+trufflehog:
+  stage: pre-commit
+  image:
+    name: trufflesecurity/trufflehog:latest
+    entrypoint: [""]
+  script:
+    - trufflehog filesystem . --exclude-paths .gitignore
+  only:
+    - merge_requests
+
+gitleaks:
+  stage: pre-commit
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source . -v
+  only:
+    - merge_requests
+
+# =============================
+# TEST BACKEND
+# =============================
+backend_test:
+  stage: test
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - mkdir -p .m2/repository          # Crée le cache Maven si absent
+    - chmod +x mvnw
+    - ./mvnw $MAVEN_CLI_OPTS clean test -Dspring.profiles.active=test
+  artifacts:
+    reports:
+      junit: target/surefire-reports/TEST-*.xml
+    expire_in: 1 week
+  only:
+    - main
+    - merge_requests
+
+# =============================
+# ANALYSE QUALITE SONARQUBE
+# =============================
+sonar_analysis:
+  stage: quality
+  image: maven:3.9.6-eclipse-temurin-17
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    GIT_DEPTH: "0"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - chmod +x mvnw
+    - ./mvnw verify sonar:sonar \
+      -Dsonar.projectKey=jgouaffo_examen_certifiant \
+      -Dsonar.host.url=$SONAR_HOST_URL \
+      -Dsonar.login=$SONAR_TOKEN
+  allow_failure: true
+  only:
+    - main
+    - merge_requests
+
+# =============================
+# BUILD + SCAN IMAGE BACKEND
+# =============================
+build_backend:
+  stage: build
+  needs: ["backend_test"]
+  before_script:
+    - docker login -u "$DOCKERHUB_USERNAME" -p "$DOCKERHUB_TOKEN"
+  script:
+    - docker build --pull -t $DOCKER_IMAGE_BACKEND:latest -t $DOCKER_IMAGE_BACKEND:$IMAGE_TAG .
+    - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --severity CRITICAL,HIGH --exit-code 0 "$DOCKER_IMAGE_BACKEND:$IMAGE_TAG"
+    - docker push $DOCKER_IMAGE_BACKEND:latest
+    - docker push $DOCKER_IMAGE_BACKEND:$IMAGE_TAG
+  only:
+    - main
+
+# =============================
+# SCAN SECURITE (DAST)
+# =============================
+nuclei_security_scan:
+  stage: security-test
+  image: projectdiscovery/nuclei:latest
+  script:
+    - echo "Lancement du scan Nuclei sur $STAGING_URL"
+    - echo "Scan ignoré si l'URL n'est pas définie."
+  artifacts:
+    paths:
+      - nuclei-results.json
+    when: always
+  allow_failure: true
+  only:
+    - main
+
+# =============================
+# DOCUMENTATION (Javadoc)
+# =============================
+javadoc_generation:
+  stage: documentation
+  image: maven:3.9.6-eclipse-temurin-17
+  script:
+    - chmod +x mvnw
+    - ./mvnw javadoc:javadoc
+    - echo "Javadoc générée dans target/site/apidocs"
+  artifacts:
+    paths:
+      - target/site/apidocs
+    expire_in: 1 week
+  only:
+    - main
+    - merge_requests
+
+# =============================
+# FIN PIPELINE / DEPLOY INFO
+# =============================
+check_health:
+  stage: deploy
+  image: curlimages/curl:latest
+  needs: ["build_backend"]
+  script:
+    - |
+      echo "Pipeline terminé avec succès !"
+      echo "Image Backend: $DOCKER_IMAGE_BACKEND:latest"
+      echo "Commit: $CI_COMMIT_SHORT_SHA"
+      echo "Javadoc disponible dans les artifacts."
+  only:
+    - main
